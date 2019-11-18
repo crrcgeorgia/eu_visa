@@ -1,0 +1,269 @@
+```{r}
+# My libraries
+library(dplyr)
+library(ggeffects)
+library(survey)
+library(tidyverse)
+library(labelled)
+library(descr)
+library(reticulate)
+
+
+PATH_2017 <- 'stata/EU_17.dta'
+PATH_2019 <- 'stata/EU_19.dta'
+
+df_17 <- haven::read_dta(PATH_2017)
+df_17$year <- '2017'
+df_19 <- haven::read_dta(PATH_2019)
+df_19$year <- '2019'
+
+df <- plyr::rbind.fill(df_17, df_19)
+
+
+```
+
+
+```{r}
+df[df <= -3] <- NA # losing legal skips and errors
+
+# Recoding employment status to employed and not employed
+df$EMPLSIT_r <- df$EMPLSIT
+df$EMPLSIT_r[df$EMPLSIT_r %in% c(1,2,3,4,7,8)] <- 0
+df$EMPLSIT_r[df$EMPLSIT_r %in% c(5,6)] <- 1
+
+# DKRA to NA, I think fine in this context as low n (<1%) and  not really part of the story
+df$EMPLSIT_r[df$EMPLSIT_r <0] <- NA
+df$EMPLSIT_r <- labelled(df$EMPLSIT_r, c("Not employed" = 0, "Employed" = 1))
+df$EMPLSIT_r <- to_factor(df$EMPLSIT_r)
+
+# Frequency of internet usages
+df$FRQINTR_r <- df$FRQINTR
+df$FRQINTR_r[df$FRQINTR_r<=0] <- NA
+df$FRQINTR_r[df$FRQINTR_r>=2] <- 0
+df$FRQINTR_r <- labelled(df$FRQINTR_r, c("Internet user" = 1, "Infrequent or non-internet user" = 0))
+df$FRQINTR_r <- to_factor(df$FRQINTR_r)
+
+# Recoding education
+df$EDUDGR_r <- df$EDUDGR
+df$EDUDGR_r[df$EDUDGR_r<1] <- NA
+df$EDUDGR_r[df$EDUDGR_r<=3] <- 0
+df$EDUDGR_r[df$EDUDGR_r==4] <- 1
+df$EDUDGR_r[df$EDUDGR_r>=5] <- 2
+df$EDUDGR_r <- labelled(df$EDUDGR_r, c("Secondary education and below" = 0, "Technical education" = 1, "Undergraduate degree and above" = 2))
+df$EDUDGR_r <-to_factor(df$EDUDGR_r)
+
+# And ethnicity
+df$ETHNIC_r <- df$ETHNIC
+df$ETHNIC_r[df$ETHNIC_r < 0] <- NA
+df$ETHNIC_r[df$ETHNIC_r != 3] <- 1
+df$ETHNIC_r[df$ETHNIC_r == 3] <- 0
+df$ETHNIC_r <- labelled(df$ETHNIC_r, c("Georgian" = 0, "Minority" = 1))
+df$ETHNIC_r <- to_factor(df$ETHNIC_r)
+
+# And settlement type
+capital <- c(10)
+urban <- c(21,22,23,24,411,421)
+rural <- c(31,32,33,34,412,422)
+
+df$settype_r <- df$substratum
+
+df$settype_r[df$settype_r %in% capital] <- 0
+df$settype_r[df$settype_r %in% urban] <- 1
+df$settype_r[df$settype_r %in% rural] <- 2
+
+df$settype_r <- labelled(df$settype_r, c("Capital" = 0, "Urban" = 1, "Rural" = 2))
+df$settype_r <- to_factor(df$settype_r)
+
+# Age as a cut
+df$age_r <- cut(df$age, c(18,35,56,99), right = FALSE,labels=c('18-34', '35-54', '55+'))
+
+# Sex as a factor
+df$sex_r <- to_factor(df$sex)
+
+
+```
+
+
+```{r}
+# Defining a list of required document variables
+NEED_MEN <- c("VLIBBPAS", "VLIBRTIC", "VLIBADDR", "VLIBMON")
+
+# Check the questions have been correctly answered and make a new binary column for each correct answer
+for (NEED in NEED_MEN){
+  df[[paste(NEED,"_S", sep='')]] <- (df[[NEED]] == 1) * 1
+}
+
+# Create a scoring variable for all documents
+df$VLIBDOC_S <- apply(X = df[,NEED_MEN] == 1, MARGIN = 1, FUN = sum, na.rm=TRUE)
+
+# Normalise. I don't think I used this in the final analysis
+df$VLIBDOC_S_norm <- df$VLIBDOC_S / 4
+
+# Create variables for correct answers to duration and work permit questions
+df$VLIBDUR_S <- sapply(X = df[,"VLIBDUR"] == 3, FUN = sum, na.rm=TRUE)
+df$VLIBWPE_S <- sapply(X = df[,"VLIBWPER"] == 0, FUN = sum, na.rm=TRUE)
+
+# And the final score column
+SCORE_COLS <- c('VLIBDOC_S','VLIBDUR_S', 'VLIBWPE_S')
+df$VLIBSCORE <- rowSums(df[, SCORE_COLS])
+
+```
+
+
+```{r}
+# Sending to Python for ease of cross-tabbing
+write.csv(df[c('year', 'VLIBSCORE','VLIBDOC_S','VLIBDUR_S', 'VLIBWPE_S', "VLIBBPAS_S", "VLIBRTIC_S", "VLIBADDR_S", "VLIBMON_S", 'ETHNIC_r', 'indwt')], 'to_python.csv')
+
+```
+
+
+```{python}
+
+# Grouped cross-tabs are a pain in R, and I made a Python function just for this purpose. Making the csvs for later plotting in JS.
+
+import pandas as pd
+
+# If you're super interested in making weighted cross-tabs in Python, email i.goodrich@crrccenters.org, It'll be up on Github at some point.
+from orda.orda_table import *
+
+
+df = pd.read_csv('to_python.csv')
+group_vars = ['VLIBDUR_S', 'VLIBWPE_S', "VLIBBPAS_S",
+              "VLIBRTIC_S", "VLIBADDR_S", "VLIBMON_S"]
+
+# Make the crosstab: by year, all vars, both Geo/Minorities
+year_split_all_vars = make_group_table(df,
+                                       group_vars=group_vars,
+                                       wt='indwt',
+                                       columns='year',
+                                       pct=0)
+
+# Reset index for lazy table manipulation
+year_split_all_vars.reset_index(inplace=True)
+
+# Bad csv import that I didn't bother to fix. Just causes more work further down the line.
+# Very longwinded way of selecting correct answers
+year_split_all_vars['index']= (year_split_all_vars['index']
+                               .astype(float)
+                               .astype(bool))
+
+year_split_all_vars = year_split_all_vars[year_split_all_vars['index']]
+
+# Dump to CSV
+year_split_all_vars.to_csv('year_split_all_vars.csv', index_label=False)
+
+
+# Same as above, but for a split in 2019 on ethnicity
+eth_split_all_vars = make_group_table(df[df['year'] == 2019],
+                                      group_vars = group_vars,
+                                      wt = 'indwt',
+                                      columns = 'ETHNIC_r',
+                                      pct=0)
+
+eth_split_all_vars.reset_index(inplace=True)
+eth_split_all_vars['index']= (eth_split_all_vars['index']
+                               .astype(float)
+                               .astype(bool))
+
+eth_split_all_vars = eth_split_all_vars[eth_split_all_vars['index']]
+
+eth_split_all_vars.to_csv('eth_split_all_vars.csv', index_label=False)
+
+# And again
+
+split_all_vars = make_group_table(df,
+                                      group_vars = group_vars,
+                                      wt = 'indwt',
+                                      columns = ['ETHNIC_r', 'year'],
+                                      pct=0)
+
+split_all_vars.reset_index(inplace=True)
+split_all_vars['index']= (split_all_vars['index']
+                               .astype(float)
+                               .astype(bool))
+
+split_all_vars = split_all_vars[split_all_vars['index']]
+
+split_all_vars.to_csv('split_all_vars.csv', index_label=False)
+
+##
+
+# Just looking at the right to work variable
+year_eth_work = make_table(df,
+                    index = 'VLIBWPE_S',
+                    wt = 'indwt',
+                    columns = ['ETHNIC_r', 'year'],
+                    pct=0)
+
+year_eth_work.to_csv('year_eth_work.csv')
+
+```
+
+
+```{r}
+# Build survey object
+svd <- survey::svydesign(id=~psu, strata=~substratum, weights=~indwt, data=df)
+
+# Check the means
+means <- svyby(~VLIBSCORE, ~year, svd, svymean)
+eth_means <- svyby(~VLIBSCORE, ~year+ETHNIC_r, svd, svymean)
+
+# Quick plot
+ggplot(means, aes(x=year, y=VLIBSCORE)) + geom_bar(stat="identity")
+
+# T-test the means
+x <- svyttest(VLIBSCORE~year, svd)
+```
+
+
+```{r}
+# Build the model
+model <- svyglm(VLIBSCORE ~ sex_r + 
+                            age_r + 
+                            ETHNIC_r + 
+                            EMPLSIT_r + 
+                            EDUDGR_r + 
+                            settype_r +
+                            FRQINTR_r, svd, family='poisson')
+
+# Check summary
+summary(model)
+
+# Get predicted probabilities
+# preds <- ggpredict(model, x.as.factor = TRUE)
+```
+
+```{r}
+# Iterate through regressors running ggemmeans with each regressor as the term
+regressors = c('sex_r', 'age_r', 'ETHNIC_r', 'EMPLSIT_r', 'EDUDGR_r', 'settype_r', 'FRQINTR_r')
+
+# Empty table for appending to
+pred_table = tibble()
+
+# Iteration loop
+for (reg in regressors){
+  # Predicted probabilities
+  preds <- ggemmeans(model, x.as.factor = TRUE, terms=reg, data = svd$variables)
+  
+  # Correct labelling of the 'group' column (otherwise = '1')
+  preds$group <- reg
+  
+  # First iteration
+  if (length(pred_table) == 0){
+    pred_table <- as_tibble(preds)
+  } else {
+    # Subsequent iterations
+    pred_table <- rbind(pred_table, as_tibble(preds))
+  }
+}
+
+# Dump to file
+write.csv(pred_table, 'model.csv')
+
+# Here's a nice plot in R, anyway
+ggplot(pred_table, aes(x=x, y=predicted)) + geom_col(stat='identity') + coord_flip() + facet_grid(group ~ .,scales = "free", space = "free")
+
+```
+
+
+
